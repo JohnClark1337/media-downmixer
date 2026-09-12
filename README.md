@@ -68,6 +68,53 @@ python audio_downmix.py /media/movies --enhance 2.0 --voice 2
 python audio_downmix.py /media/movies --no-remux
 ```
 
+## Docker
+
+A `Dockerfile` bundles the tool with a **modern ffmpeg** (includes
+`dialoguenhance`), ffprobe, and mkvmerge — so what Ubuntu/Debian's old apt
+ffmpeg ships can never break it. The image is Alpine-based and self-contained;
+no dependencies are installed on the host.
+
+**Build** (on the media server or any machine with Docker):
+
+```sh
+docker build -t media-downmixer .
+```
+
+**Run** — mount your library **read-only** and a writable output dir:
+
+```sh
+docker run --rm \
+  -v /mnt/Plex/TV:/media:ro \
+  -v /mnt/Plex/nightmix_output:/output \
+  media-downmixer /media --output /output
+```
+
+Everything after the image name is a normal `audio_downmix.py` argument, so
+`--jobs`, `--replace`, `--dry-run`, `--log`, etc. all work. Run inside
+`tmux`/`screen` for long queues.
+
+```sh
+# Preview first
+docker run --rm -v /mnt/Plex/TV:/media:ro -v /mnt/Plex/nightmix_output:/output \
+  media-downmixer /media --output /output --dry-run
+
+# Parallel
+docker run --rm -v /mnt/Plex/TV:/media:ro -v /mnt/Plex/nightmix_output:/output \
+  media-downmixer /media --output /output --jobs 4
+```
+
+Or use the included `docker-compose.yml` (edit the host paths, then
+`docker compose up --build`). `--in-place` won't work in the container because
+the library is mounted read-only — use `--output` instead.
+
+If the output files should be owned by your user rather than root, add
+`--user "$(id -u):$(id -g)"` to the `docker run` command.
+
+The Dockerfile verifies at build time that `dialoguenhance`, `ffprobe`, and
+`mkvmerge` are all present, so a broken intermediate image fails fast during
+the build instead of on the first video file.
+
 ### Options
 
 | Option | Default | Description |

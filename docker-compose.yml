@@ -1,0 +1,19 @@
+# docker compose run for media-downmixer
+#
+# Adjust the host paths to match your library, then:
+#   docker compose up --build
+#
+# Or use `docker compose run --rm media-downmixer` for a one-shot run.
+# Everything after the service name/command is passed to audio_downmix.py.
+
+services:
+  media-downmixer:
+    build: .
+    image: media-downmixer:latest
+    # Library mounted read-only so processing can never modify originals.
+    volumes:
+      - /mnt/Plex/TV:/media:ro
+      - /mnt/Plex/nightmix_output:/output
+    command: ["/media", "--output", "/output"]
+    # Run-to-completion container; logs go to stdout/stderr.
+    restart: "no"

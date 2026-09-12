@@ -143,6 +143,30 @@ def check_tools(ffmpeg, ffprobe, require_mkvmerge=False):
         )
 
 
+def has_filter(ffmpeg, name):
+    proc = run_capture([ffmpeg, "-hide_banner", "-filters"])
+    if proc.returncode != 0:
+        return False
+    line = " %s " % name
+    for row in proc.stdout.splitlines():
+        if line in " %s " % row:
+            return True
+    return False
+
+
+def check_filter_support(args):
+    if args.enhance <= 0:
+        return
+    if not has_filter(args.ffmpeg, "dialoguenhance"):
+        raise ToolError(
+            "This ffmpeg (%s) has no 'dialoguenhance' filter. That filter requires "
+            "ffmpeg 6.0 or newer; Ubuntu/Debian apt often ships an older build. "
+            "Install a modern ffmpeg (e.g. the static build from "
+            "johnvansickle.com), or run with --enhance 0 for a plain downmix."
+            % args.ffmpeg
+        )
+
+
 def scan_for_files(paths, extensions):
     ext_set = {e.lower() if e.startswith(".") else "." + e.lower() for e in extensions}
     found = []
@@ -548,6 +572,7 @@ def main(argv=None):
 
     try:
         check_tools(args.ffmpeg, args.ffprobe, require_mkvmerge=args.remux)
+        check_filter_support(args)
     except ToolError as exc:
         log.error("%s", exc)
         if args.dry_run:

@@ -1,0 +1,8 @@
+.git/
+nightmix_output/
+__pycache__/
+*.pyc
+*.log
+Dockerfile
+docker-compose.yml
+README.md
