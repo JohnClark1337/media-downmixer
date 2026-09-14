@@ -14,8 +14,10 @@ surround layout, this tool:
 Video, subtitles and the original audio are stream-copied, so the job is fast
 and lossless for everything except the new stereo track.
 
-The tool accepts individual files or directories (searched recursively), so a
-whole media library can be queued in a single run.
+The tool accepts individual files or directories (searched recursively unless
+--no-recursive is given), so a whole media library can be queued in a single
+run. While processing, a live progress bar shows overall completion and the
+file currently being worked on (disabled with --no-progress).
 
 Examples
 --------
@@ -44,10 +46,12 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 if sys.version_info < (3, 5):
     sys.stderr.write(
@@ -167,7 +171,7 @@ def check_filter_support(args):
         )
 
 
-def scan_for_files(paths, extensions):
+def scan_for_files(paths, extensions, recursive=True):
     ext_set = {e.lower() if e.startswith(".") else "." + e.lower() for e in extensions}
     found = []
     for p in paths:
@@ -178,7 +182,11 @@ def scan_for_files(paths, extensions):
             else:
                 log.warning("Ignoring non-video file: %s", p)
         elif os.path.isdir(p):
-            for root, _dirs, files in os.walk(p):
+            if recursive:
+                walker = os.walk(p)
+            else:
+                walker = iter([next(os.walk(p), (p, [], []))])
+            for root, _dirs, files in walker:
                 for name in files:
                     if os.path.splitext(name)[1].lower() in ext_set:
                         found.append((os.path.join(root, name), p))
@@ -413,6 +421,71 @@ def remux_with_mkvmerge(mkvmerge, path, verbose):
         raise RuntimeError("Could not replace output with remuxed file: {}".format(exc))
 
 
+class ProgressBar(object):
+    """Live, single-line progress display written to stderr (TTY only).
+
+    Swallows any terminal errors so progress can never crash a run.
+    """
+
+    def __init__(self, total, enabled):
+        self.total = total
+        self.enabled = enabled
+        self._lock = threading.Lock()
+        self._done = 0
+        self._current = ""
+        self._last = 0
+        self._width = 100
+        try:
+            self._width = shutil.get_terminal_size((100, 24)).columns
+        except Exception:
+            pass
+
+    def show_current(self, name):
+        with self._lock:
+            self._current = name
+            self._draw()
+
+    def completed(self):
+        with self._lock:
+            self._done += 1
+            self._draw()
+
+    def finish(self):
+        self.clear()
+
+    def clear(self):
+        if not self.enabled:
+            return
+        try:
+            sys.stderr.write("\r" + " " * self._last + "\r")
+            sys.stderr.flush()
+            self._last = 0
+        except Exception:
+            pass
+
+    def _draw(self):
+        if not self.enabled:
+            return
+        try:
+            total = self.total
+            done = self._done
+            pct = (100.0 * done / total) if total > 0 else 100.0
+            width = max(20, min(self._width, 120))
+            bar_w = max(10, width - 24)
+            filled = int(round(bar_w * pct / 100.0)) if total else bar_w
+            bar = "#" * filled + "-" * (bar_w - filled)
+            line = "\r[%s] %d/%d %3.0f%% | %s" % (
+                bar, done, total, pct, self._current)
+            if len(line) > width:
+                line = line[:width]
+            pad = " " * max(0, self._last - len(line))
+            self._last = len(line)
+            sys.stderr.write(line + pad + "\r")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+
 def process_one(args, src, base):
     try:
         vf = analyze_file(src, args.ffprobe)
@@ -520,6 +593,12 @@ def make_parser():
     parser.add_argument("--ext", nargs="+", default=sorted(VIDEO_EXTENSIONS),
                         metavar="EXT",
                         help="file extensions to process (default: %(default)s)")
+    parser.add_argument("--recursive", action="store_true", default=True,
+                        help="scan directories recursively (default: on)")
+    parser.add_argument("--no-recursive", dest="recursive", action="store_false",
+                        help="only process the immediate files of each directory")
+    parser.add_argument("--no-progress", action="store_true",
+                        help="disable the live progress bar (also disabled when output is not a TTY)")
     parser.add_argument("--jobs", type=int, default=1,
                         help="number of files to process in parallel (default: %(default)s)")
     parser.add_argument("--dry-run", action="store_true",
@@ -582,7 +661,7 @@ def main(argv=None):
     if args.in_place and args.output != DEFAULT_OUTPUT_DIR:
         log.error("--in-place and --output are mutually exclusive; ignoring --output")
 
-    files = scan_for_files(args.paths, args.ext)
+    files = scan_for_files(args.paths, args.ext, recursive=args.recursive)
     if not files:
         log.error("No video files found in the given paths.")
         return 1
@@ -598,13 +677,16 @@ def main(argv=None):
                             STATUS_UNCHANGED, STATUS_FAILED)}
     failures = []
 
-    if args.jobs == 1 or args.dry_run:
-        results = [process_one(args, src, base) for src, base in files]
-    else:
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            results = list(pool.map(lambda fb: process_one(args, fb[0], fb[1]), files))
+    use_bar = (
+        not args.quiet
+        and not args.no_progress
+        and not args.dry_run
+        and sys.stderr.isatty()
+    )
+    progress = ProgressBar(len(files), enabled=use_bar)
 
-    for i, (src, base, status, msg) in enumerate(results, 1):
+    def finish(i, res):
+        src, base, status, msg = res
         counts[status] = counts.get(status, 0) + 1
         rel = src if base is None else os.path.relpath(src, base)
         if status == STATUS_FAILED:
@@ -617,6 +699,34 @@ def main(argv=None):
             log.info("[%d/%d] %-8s %s  (%s)", i, len(files), "OK", rel, msg)
         else:
             log.info("[%d/%d] %-8s %s  (%s)", i, len(files), status.upper(), rel, msg)
+
+    def started(i, rel):
+        if not args.quiet and not use_bar:
+            log.info("[%d/%d] processing %s ...", i, len(files), os.path.basename(rel))
+
+    if args.jobs == 1 or args.dry_run:
+        for i, (src, base) in enumerate(files, 1):
+            rel = src if base is None else os.path.relpath(src, base)
+            started(i, rel)
+            progress.show_current(rel)
+            res = process_one(args, src, base)
+            progress.completed()
+            progress.clear()
+            finish(i, res)
+    else:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures = []
+            for i, (src, base) in enumerate(files, 1):
+                rel = src if base is None else os.path.relpath(src, base)
+                started(i, rel)
+                progress.show_current(rel)
+                futures.append(pool.submit(process_one, args, src, base))
+            for i, fut in enumerate(as_completed(futures), 1):
+                res = fut.result()
+                progress.completed()
+                progress.clear()
+                finish(i, res)
+    progress.finish()
 
     log.info("\nSummary:")
     log.info("  Processed : %d", counts[STATUS_PROCESSED])

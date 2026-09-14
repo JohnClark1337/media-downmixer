@@ -38,7 +38,8 @@ python audio_downmix.py PATH [PATH ...] [options]
 ```
 
 `PATH` can be a video file or a directory (searched recursively, including
-subdirectories). Multiple paths may be given.
+subdirectories). Multiple paths may be given. Use `--no-recursive` to only
+process the immediate files of each directory.
 
 ### Examples
 
@@ -60,6 +61,9 @@ python audio_downmix.py /media/movies --jobs 4 --log downmix.log
 
 # Process files even if they already have an English stereo track
 python audio_downmix.py /media/movies --force
+
+# Only the immediate files of each directory, no recursion
+python audio_downmix.py /media/movies --no-recursive
 
 # Stronger dialog boost, full volume
 python audio_downmix.py /media/movies --enhance 2.0 --voice 2
@@ -127,6 +131,8 @@ the build instead of on the first video file.
 | `--voice N` | `2` | Dialog voice-detection sensitivity, `2..32` |
 | `--bitrate K` | `192k` | Bitrate of the new stereo AAC track |
 | `--ext EXT [...]` | `.mkv .mp4 .avi .mov .m4v .webm` | Extensions to scan for |
+| `--recursive` / `--no-recursive` | recursive | Scan directories recursively (or only the immediate files) |
+| `--no-progress` | off | Disable the live progress bar |
 | `--jobs N` | `1` | Number of files processed in parallel |
 | `--dry-run` | off | Print the ffmpeg commands without running them |
 | `--ffmpeg P` / `--ffprobe P` | `ffmpeg` / `ffprobe` | Paths to tools |
@@ -138,6 +144,13 @@ the build instead of on the first video file.
 
 ## Behavior notes
 
+- **Progress**: on an interactive terminal a live bar shows completion
+  (`[####----] 13/27 48%`) plus the file currently being processed; it's
+  updated as each file finishes and redrawn on every change. When output is not
+  a TTY (piped, Docker without `-t`, or with `-q`/`--no-progress`), the bar is
+  skipped and each file is instead reported as it starts and completes. In
+  parallel mode, "currently processing" shows the most recently dispatched
+  file while other workers keep running.
 - **Skipped files** are reported and counted — nothing is silently dropped.
 - **In-place mode** writes to a temporary file first, then atomically replaces
   the original; a failed run leaves the original untouched.
