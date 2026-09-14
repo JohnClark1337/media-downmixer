@@ -33,7 +33,7 @@ Examples
   # Preview everything the tool would do without touching files
   python3 audio_downmix.py /media/movies --dry-run
 
-# Process 4 files at once and log to a file
+   # Process 4 files at once and log to a file
    python3 audio_downmix.py /media/movies --jobs 4 --log downmix.log
 
 After ffmpeg muxes the new track, matroska output is passed through

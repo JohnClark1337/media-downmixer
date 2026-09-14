@@ -5,6 +5,8 @@ videos that contain **5.1 / 7.1** (or other multichannel) surround sound.
 
 Designed for headless media servers: it accepts whole directories, recurses
 through the tree, queues every video file, and processes them through `ffmpeg`.
+A live progress bar shows overall completion and the file currently being
+processed (disabled with `--no-progress` or when output is not a TTY).
 Video and subtitles are **stream-copied** (no re-encode), so only the new stereo
 audio track is actually encoded — fast even for large libraries.
 
