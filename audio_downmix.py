@@ -8,7 +8,10 @@ surround layout, this tool:
      relative to the rest of the mix.
   2. Downmixes the surround channels to stereo using the `pan` filter (centre
      and surround channels folded in with 0.707 coefficients).
-  3. Encodes the result as a new stereo audio track (AAC / Opus) and muxes it
+  3. Applies `loudnorm` loudness normalization (default target -16 LUFS) so the
+     new stereo track sits at a consistent loudness; override with --loudness,
+     disable with --no-loudnorm.
+  4. Encodes the result as a new stereo audio track (AAC / Opus) and muxes it
      alongside the original tracks.
 
 Video, subtitles and the original audio are stream-copied, so the job is fast
@@ -17,7 +20,9 @@ and lossless for everything except the new stereo track.
 The tool accepts individual files or directories (searched recursively unless
 --no-recursive is given), so a whole media library can be queued in a single
 run. While processing, a live progress bar shows overall completion and the
-file currently being worked on (disabled with --no-progress).
+file currently being worked on (disabled with --no-progress). In sequential
+recursive runs, --pause asks before continuing past each completed directory
+(interactive TTY only).
 
 Examples
 --------
@@ -40,6 +45,11 @@ After ffmpeg muxes the new track, matroska output is passed through
 `mkvmerge` (if available) so clusters/cues are written the way VLC's reader
 expects. Without this, long seeks on DVD-era MPEG-2 files can freeze in VLC.
 Disable with --no-remux.
+
+The new stereo track is placed first and marked as the default audio track,
+and (unless --no-loudnorm) it goes through loudnorm normalization targeted at
+--loudness LUFS. In serial recursive runs, --pause makes the tool ask before
+moving on to each new directory so you can bail out of a long queue.
 """
 
 import argparse
@@ -284,7 +294,7 @@ def build_pan(stream):
     return "stereo|c0={}|c1={}".format(c0, c1)
 
 
-def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace):
+def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace, loudness=None):
     ext = os.path.splitext(dst)[1].lower()
     targets = [s for s in vf.audio if needs_downmix(s)]
 
@@ -296,6 +306,8 @@ def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace):
                 enhance, voice, build_pan(s))
         else:
             chain = "pan={}".format(build_pan(s))
+        if loudness is not None:
+            chain += ",loudnorm=I={:g}:TP=-1.5:LRA=11,aresample=48000".format(loudness)
         fc_parts.append("[0:a:{}]{}[d{}]".format(s.pos, chain, k))
         labels.append("[d{}]".format(k))
 
@@ -304,39 +316,48 @@ def build_command(ffmpeg, src, dst, vf, enhance, voice, bitrate, replace):
     stereo_codec = "libopus" if ext == ".webm" else "aac"
     stereo_bitrate = "160k" if ext == ".webm" else bitrate
 
+    n_stereo = len(labels)
+
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", src]
     cmd += ["-map", "0:v"]
 
-    original_audio_indices = []
+    # New stereo tracks are mapped BEFORE the originals so they become stream
+    # indices 0..n-1, i.e. the first (and -> default) audio tracks in the output.
+    stereo_labels = list(labels)
+    for k in range(n_stereo):
+        cmd += ["-map", labels[k]]
+
+    original_map = []
     if replace:
         copies = [s for s in vf.audio if not needs_downmix(s)]
         for s in copies:
             cmd += ["-map", "0:a:%d" % s.pos]
-            original_audio_indices.append(s.pos)
+            original_map.append(s.pos)
     else:
         cmd += ["-map", "0:a"]
-        original_audio_indices = list(range(len(vf.audio)))
-
-    for k in range(len(labels)):
-        cmd += ["-map", labels[k]]
+        original_map = list(range(len(vf.audio)))
 
     if filter_complex:
         cmd += ["-filter_complex", filter_complex]
 
     cmd += ["-c:v", "copy"]
 
-    for idx, _a in enumerate(original_audio_indices):
-        cmd += ["-c:a:%d" % idx, "copy"]
-
-    for k in range(len(labels)):
-        idx = len(original_audio_indices) + k
+    for k in range(n_stereo):
         cmd += [
-            "-c:a:%d" % idx, stereo_codec,
-            "-b:a:%d" % idx, stereo_bitrate,
-            "-ac:a:%d" % idx, "2",
-            "-metadata:s:a:%d" % idx, "title=Nightmix Stereo",
-            "-metadata:s:a:%d" % idx, "language=eng",
+            "-c:a:%d" % k, stereo_codec,
+            "-b:a:%d" % k, stereo_bitrate,
+            "-ac:a:%d" % k, "2",
+            "-metadata:s:a:%d" % k, "title=Nightmix Stereo",
+            "-metadata:s:a:%d" % k, "language=eng",
         ]
+
+    for idx, _a in enumerate(original_map):
+        cmd += ["-c:a:%d" % (n_stereo + idx), "copy"]
+
+    # Explicitly make the first (new stereo) track the default audio selected by
+    # players/Plex instead of leaving it up to container heuristics.
+    if n_stereo:
+        cmd += ["-disposition:a:0", "default"]
 
     if vf.subtitle_codecs and ext == ".mkv":
         cmd += ["-map", "0:s", "-c:s", "copy"]
@@ -514,6 +535,7 @@ def process_one(args, src, base):
         voice=args.voice,
         bitrate=args.bitrate,
         replace=args.replace,
+        loudness=args.loudness if args.loudnorm else None,
     )
 
     remux = args.remux and os.path.splitext(dst)[1].lower() in (".mkv", ".webm")
@@ -611,6 +633,17 @@ def make_parser():
     parser.add_argument("--no-remux", action="store_true",
                         help="skip the mkvmerge re-mux step (output may seek "
                              "poorly in VLC for DVD-era MPEG-2 files)")
+    parser.add_argument("--loudness", type=float, default=-16.0,
+                        help="target integrated loudness (LUFS) for the new "
+                             "stereo track via loudnorm (default: %(default)s)")
+    parser.add_argument("--no-loudnorm", dest="loudnorm",
+                        action="store_false", default=True,
+                        help="disable loudnorm/loudness normalization so the "
+                             "new stereo track keeps its natural level")
+    parser.add_argument("--pause", action="store_true",
+                        help="in a recursive sequential run (--jobs 1), after "
+                             "each completed directory ask whether to continue "
+                             "to the next one (interactive TTY only)")
     parser.add_argument("--log", metavar="FILE", help="also write log output to this file")
     parser.add_argument("-q", "--quiet", action="store_true", help="only print errors and the summary")
     parser.add_argument("-v", "--verbose", action="store_true", help="print ffmpeg commands and details")
@@ -701,12 +734,33 @@ def main(argv=None):
             log.info("[%d/%d] %-8s %s  (%s)", i, len(files), status.upper(), rel, msg)
 
     def started(i, rel):
-        if not args.quiet and not use_bar:
+        if not args.quiet:
             log.info("[%d/%d] processing %s ...", i, len(files), os.path.basename(rel))
 
     if args.jobs == 1 or args.dry_run:
+        prev_dir = None
         for i, (src, base) in enumerate(files, 1):
             rel = src if base is None else os.path.relpath(src, base)
+            cur_dir = os.path.dirname(src)
+            if (args.pause and prev_dir is not None and cur_dir != prev_dir
+                    and not args.dry_run and not args.quiet
+                    and sys.stdin.isatty()):
+                progress.clear()
+                sys.stdout.write(
+                    "\nFinished directory {!r}. Continue to {!r}? [Y/n] ".format(
+                        os.path.basename(os.path.normpath(prev_dir)),
+                        os.path.basename(os.path.normpath(cur_dir))))
+                sys.stdout.flush()
+                try:
+                    answer = sys.stdin.readline().strip().lower()
+                except (EOFError, OSError):
+                    answer = "n"
+                if answer in ("n", "no"):
+                    log.info("Skipped the remaining %d file(s) after %r.",
+                             len(files) - i + 1,
+                             os.path.basename(os.path.normpath(prev_dir)))
+                    break
+            prev_dir = cur_dir
             started(i, rel)
             progress.show_current(rel)
             res = process_one(args, src, base)

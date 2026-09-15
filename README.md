@@ -16,8 +16,11 @@ audio track is actually encoded — fast even for large libraries.
    dialogue relative to the rest of the mix.
 2. **Downmix to stereo** — the `pan` filter folds the centre (0.707) and
    surround (0.707) channels into left/right, dropping the LFE.
-3. **New track** — the result is encoded as a stereo AAC track
-   (`libopus` for `.webm`) and muxed into the file.
+3. **Loudness normalization** — `loudnorm` targets `--loudness` LUFS (default
+   `-16`) so the new track has a consistent level; disable with `--no-loudnorm`.
+4. **New track** — the result is encoded as a stereo AAC track
+   (`libopus` for `.webm`), placed as the **first** audio track marked
+   **default**, and muxed into the file.
 
 By default the original surround track is **kept** and the stereo track is
 **added** alongside it. A file is only skipped when it already has an
@@ -132,6 +135,8 @@ the build instead of on the first video file.
 | `--enhance N` | `1.5` | Dialog boost factor, `0..3` (`0` disables the filter) |
 | `--voice N` | `2` | Dialog voice-detection sensitivity, `2..32` |
 | `--bitrate K` | `192k` | Bitrate of the new stereo AAC track |
+| `--loudness LUFS` | `-16` | `loudnorm` target integrated loudness for the new stereo track (`--no-loudnorm` disables normalization) |
+| `--pause` | off | In sequential recursive runs, ask before continuing to the next directory (interactive TTY only) |
 | `--ext EXT [...]` | `.mkv .mp4 .avi .mov .m4v .webm` | Extensions to scan for |
 | `--recursive` / `--no-recursive` | recursive | Scan directories recursively (or only the immediate files) |
 | `--no-progress` | off | Disable the live progress bar |
